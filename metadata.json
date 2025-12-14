@@ -1,0 +1,7 @@
+{
+  "name": "FairShare Bill Splitter",
+  "description": "Automatically analyze receipts using Gemini to split costs between two people easily.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
