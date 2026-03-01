@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { analyzeReceipt } from './services/geminiService';
+import { analyzeReceiptStream } from './services/geminiService';
 import { BillItem, Payer } from './types';
 import { LoadingOverlay } from './components/LoadingOverlay';
 import { PayerToggle } from './components/PayerToggle';
@@ -26,6 +26,7 @@ export default function App() {
   const [file, setFile] = useState<File | null>(null);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
   const [items, setItems] = useState<BillItem[]>([]);
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -34,23 +35,77 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }, [step]);
 
+  useEffect(() => {
+    const handlePaste = (e: ClipboardEvent) => {
+      if (step !== Step.Upload || isAnalyzing) return;
+      
+      const items = e.clipboardData?.items;
+      if (!items) return;
+
+      for (let i = 0; i < items.length; i++) {
+        if (items[i].type.indexOf('image') !== -1) {
+          const blob = items[i].getAsFile();
+          if (blob) {
+            handleFile(blob);
+            break;
+          }
+        }
+      }
+    };
+
+    window.addEventListener('paste', handlePaste);
+    return () => window.removeEventListener('paste', handlePaste);
+  }, [step, isAnalyzing]);
+
+  const handleFile = (selectedFile: File) => {
+    setFile(selectedFile);
+    setError(null);
+    
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      setImagePreview(reader.result as string);
+      processImage(selectedFile, reader.result as string);
+    };
+    reader.readAsDataURL(selectedFile);
+  };
+
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
-      const selectedFile = e.target.files[0];
-      setFile(selectedFile);
-      setError(null);
-      
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        setImagePreview(reader.result as string);
-        processImage(selectedFile, reader.result as string);
-      };
-      reader.readAsDataURL(selectedFile);
+      handleFile(e.target.files[0]);
+    }
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+      const droppedFile = e.dataTransfer.files[0];
+      if (droppedFile.type.startsWith('image/')) {
+        handleFile(droppedFile);
+      }
     }
   };
 
   const processImage = async (file: File, base64Url: string) => {
     setIsAnalyzing(true);
+    setStep(Step.Review);
+    setItems([]);
+    setError(null);
+
     try {
       const parts = base64Url.split(',');
       const base64Data = parts[1];
@@ -62,23 +117,28 @@ export default function App() {
       }
       if (!mimeType) mimeType = 'image/jpeg';
 
-      const result = await analyzeReceipt(base64Data, mimeType);
+      const stream = analyzeReceiptStream(base64Data, mimeType);
       
-      const newItems: BillItem[] = result.items.map((item, index) => ({
-        id: `item-${Date.now()}-${index}`,
-        name: item.name,
-        price: item.price,
-        taxRate: item.taxRate || 0.10, // Default to 10%
-        payer: Payer.Split
-      }));
-
-      setItems(newItems);
-      setStep(Step.Review);
+      for await (const currentItems of stream) {
+        setItems(prevItems => {
+          return currentItems.map((item, index) => {
+            if (index < prevItems.length) {
+              return { ...prevItems[index], name: item.name, price: item.price, taxRate: item.taxRate };
+            } else {
+              return {
+                id: `item-${Date.now()}-${index}`,
+                name: item.name,
+                price: item.price,
+                taxRate: item.taxRate || 0.10,
+                payer: Payer.Split
+              };
+            }
+          });
+        });
+      }
     } catch (err) {
       setError("Failed to analyze receipt. Please try again or enter items manually.");
       console.error(err);
-      setStep(Step.Review); // Allow manual entry even on failure
-      setItems([]);
     } finally {
       setIsAnalyzing(false);
     }
@@ -155,7 +215,15 @@ export default function App() {
 
             <div 
               onClick={() => fileInputRef.current?.click()}
-              className="group relative w-full max-w-md aspect-[4/3] rounded-3xl border-2 border-dashed border-slate-300 hover:border-indigo-500 hover:bg-slate-50 transition-all cursor-pointer flex flex-col items-center justify-center bg-white shadow-sm hover:shadow-md"
+              onDragOver={handleDragOver}
+              onDragEnter={handleDragOver}
+              onDragLeave={handleDragLeave}
+              onDrop={handleDrop}
+              className={`group relative w-full max-w-md aspect-[4/3] rounded-3xl border-2 border-dashed transition-all cursor-pointer flex flex-col items-center justify-center bg-white shadow-sm hover:shadow-md ${
+                isDragging 
+                  ? 'border-indigo-500 bg-indigo-50 scale-[1.02]' 
+                  : 'border-slate-300 hover:border-indigo-500 hover:bg-slate-50'
+              }`}
             >
               <input 
                 ref={fileInputRef}
@@ -164,10 +232,14 @@ export default function App() {
                 onChange={handleFileSelect}
                 className="hidden"
               />
-              <div className="bg-indigo-50 p-6 rounded-full group-hover:bg-indigo-100 transition-colors mb-4">
-                <CameraIcon className="w-10 h-10 text-indigo-600" />
+              <div className={`p-6 rounded-full transition-colors mb-4 ${
+                isDragging ? 'bg-indigo-200' : 'bg-indigo-50 group-hover:bg-indigo-100'
+              }`}>
+                <CameraIcon className={`w-10 h-10 transition-transform ${isDragging ? 'scale-110 text-indigo-700' : 'text-indigo-600'}`} />
               </div>
-              <p className="font-semibold text-slate-700">Tap to upload receipt</p>
+              <p className={`font-semibold transition-colors ${isDragging ? 'text-indigo-700' : 'text-slate-700'}`}>
+                {isDragging ? 'Drop to upload' : 'Tap, paste (Ctrl+V) or drag receipt'}
+              </p>
               <p className="text-sm text-slate-400 mt-1">Supports JPG, PNG</p>
             </div>
           </div>
@@ -216,7 +288,7 @@ export default function App() {
                 {items.map((item) => (
                   <div 
                     key={item.id} 
-                    className={`bg-white rounded-xl p-4 shadow-sm border transition-all ${step === Step.Split ? 'border-slate-200' : 'border-indigo-100 ring-1 ring-indigo-50'}`}
+                    className={`bg-white rounded-xl p-4 shadow-sm border transition-all animate-in slide-in-from-bottom-2 fade-in duration-300 ${step === Step.Split ? 'border-slate-200' : 'border-indigo-100 ring-1 ring-indigo-50'}`}
                   >
                     {/* Row 1: Name and Price */}
                     <div className="flex gap-3 mb-3 items-start">
@@ -308,6 +380,13 @@ export default function App() {
                     </div>
                   </div>
                 ))}
+                
+                {isAnalyzing && step === Step.Review && (
+                  <div className="bg-indigo-50/50 rounded-xl p-4 border border-indigo-100 border-dashed animate-pulse flex items-center justify-center gap-3">
+                    <div className="w-5 h-5 border-2 border-indigo-600 border-t-transparent rounded-full animate-spin"></div>
+                    <span className="text-sm font-medium text-indigo-600">Extracting items...</span>
+                  </div>
+                )}
               </div>
               
               {/* Bottom Actions */}
@@ -315,10 +394,15 @@ export default function App() {
                 {step === Step.Review ? (
                   <button
                     onClick={() => setStep(Step.Split)}
-                    className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-4 rounded-xl shadow-lg shadow-indigo-200 transition-all flex items-center justify-center gap-2"
+                    disabled={isAnalyzing || items.length === 0}
+                    className={`w-full font-bold py-4 rounded-xl shadow-lg transition-all flex items-center justify-center gap-2 ${
+                      isAnalyzing || items.length === 0 
+                        ? 'bg-slate-200 text-slate-400 cursor-not-allowed shadow-none' 
+                        : 'bg-indigo-600 hover:bg-indigo-700 text-white shadow-indigo-200'
+                    }`}
                   >
-                    Next: Assign Payers
-                    <ArrowRightIcon className="w-5 h-5" />
+                    {isAnalyzing ? 'Analyzing...' : 'Next: Assign Payers'}
+                    {!isAnalyzing && <ArrowRightIcon className="w-5 h-5" />}
                   </button>
                 ) : (
                   <div className="space-y-4">
@@ -367,7 +451,7 @@ export default function App() {
         )}
       </main>
 
-      {isAnalyzing && <LoadingOverlay message="Reading receipt details..." />}
+      {isAnalyzing && step === Step.Upload && <LoadingOverlay message="Preparing image..." />}
     </div>
   );
 }
