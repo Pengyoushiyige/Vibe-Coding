@@ -1,9 +1,10 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { analyzeReceiptStream } from './services/geminiService';
 import { BillItem, Payer } from './types';
 import { LoadingOverlay } from './components/LoadingOverlay';
 import { PayerToggle } from './components/PayerToggle';
 import { ResultsSummary } from './components/ResultsSummary';
+import { SplitReport } from './components/SplitReport';
 import { 
   ReceiptIcon, 
   PlusIcon, 
@@ -18,7 +19,8 @@ import {
 enum Step {
   Upload = 'UPLOAD',
   Review = 'REVIEW',
-  Split = 'SPLIT'
+  Split = 'SPLIT',
+  Report = 'REPORT'
 }
 
 export default function App() {
@@ -28,8 +30,35 @@ export default function App() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const [items, setItems] = useState<BillItem[]>([]);
+  const [merchantName, setMerchantName] = useState<string>('');
+  const [date, setDate] = useState<string>('');
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const calculations = useMemo(() => {
+    let user1Total = 0;
+    let user2Total = 0;
+    let grandTotal = 0;
+
+    items.forEach(item => {
+      const price = item.price || 0;
+      const taxRate = item.taxRate || 0.10;
+      const priceWithTax = price * (1 + taxRate);
+
+      grandTotal += priceWithTax;
+
+      if (item.payer === Payer.User1) {
+        user1Total += priceWithTax;
+      } else if (item.payer === Payer.User2) {
+        user2Total += priceWithTax;
+      } else {
+        user1Total += priceWithTax / 2;
+        user2Total += priceWithTax / 2;
+      }
+    });
+
+    return { user1Total, user2Total, grandTotal };
+  }, [items]);
 
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -104,6 +133,8 @@ export default function App() {
     setIsAnalyzing(true);
     setStep(Step.Review);
     setItems([]);
+    setMerchantName('');
+    setDate('');
     setError(null);
 
     try {
@@ -119,9 +150,12 @@ export default function App() {
 
       const stream = analyzeReceiptStream(base64Data, mimeType);
       
-      for await (const currentItems of stream) {
+      for await (const chunk of stream) {
+        if (chunk.merchantName) setMerchantName(chunk.merchantName);
+        if (chunk.date) setDate(chunk.date);
+        
         setItems(prevItems => {
-          return currentItems.map((item, index) => {
+          return chunk.items.map((item, index) => {
             if (index < prevItems.length) {
               return { ...prevItems[index], name: item.name, price: item.price, taxRate: item.taxRate };
             } else {
@@ -171,6 +205,8 @@ export default function App() {
     setFile(null);
     setImagePreview(null);
     setItems([]);
+    setMerchantName('');
+    setDate('');
     setError(null);
     setStep(Step.Upload);
   };
@@ -178,7 +214,7 @@ export default function App() {
   return (
     <div className="min-h-screen bg-slate-50 pb-20">
       {/* Header */}
-      <header className="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-sm">
+      <header className="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-sm no-print">
         <div className="max-w-3xl mx-auto px-4 h-16 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <div className="bg-indigo-600 p-2 rounded-lg">
@@ -246,7 +282,7 @@ export default function App() {
         )}
 
         {/* Step 2 & 3: Review & Split */}
-        {step !== Step.Upload && (
+        {step !== Step.Upload && step !== Step.Report && (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             
             {/* Left Column: Editor */}
@@ -267,6 +303,13 @@ export default function App() {
                 >
                   2. Split Bill
                 </button>
+                <ArrowRightIcon className="w-4 h-4 text-slate-300" />
+                <button
+                  onClick={() => setStep(Step.Report)}
+                  className="px-2 py-1 rounded-md transition-colors hover:bg-slate-50 text-slate-600"
+                >
+                  3. Report
+                </button>
               </div>
 
               <div className="flex items-center justify-between">
@@ -282,6 +325,35 @@ export default function App() {
                    Add Item
                  </button>
                 )}
+              </div>
+
+              {/* Receipt Details Editor Card */}
+              <div className="bg-white rounded-xl p-4 shadow-sm border border-slate-200/60 space-y-3 no-print">
+                <div className="flex items-center gap-2 pb-2 border-b border-slate-100">
+                  <ReceiptIcon className="w-4 h-4 text-indigo-600" />
+                  <span className="text-sm font-bold text-slate-700">Receipt Details / 領収書情報</span>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-500 mb-1">Store / スーパー名</label>
+                    <input 
+                      type="text"
+                      value={merchantName}
+                      onChange={(e) => setMerchantName(e.target.value)}
+                      placeholder="e.g. イオン, セブン"
+                      className="w-full text-sm font-medium text-slate-800 bg-slate-50 px-3 py-1.5 rounded-lg border border-slate-200 focus:outline-none focus:border-indigo-500 transition-colors"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-500 mb-1">Date / 日付</label>
+                    <input 
+                      type="date"
+                      value={date}
+                      onChange={(e) => setDate(e.target.value)}
+                      className="w-full text-sm font-medium text-slate-800 bg-slate-50 px-3 py-1.5 rounded-lg border border-slate-200 focus:outline-none focus:border-indigo-500 transition-colors"
+                    />
+                  </div>
+                </div>
               </div>
 
               <div className="space-y-3">
@@ -408,8 +480,15 @@ export default function App() {
                   <div className="space-y-4">
                     <ResultsSummary items={items} />
                     <button
+                      onClick={() => setStep(Step.Report)}
+                      className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-4 rounded-xl shadow-lg shadow-indigo-200 transition-all flex items-center justify-center gap-2"
+                    >
+                      <span>精算レポートを作成する</span>
+                      <ArrowRightIcon className="w-5 h-5" />
+                    </button>
+                    <button
                       onClick={() => setStep(Step.Review)}
-                      className="w-full bg-white border border-slate-200 text-slate-600 hover:text-slate-800 hover:bg-slate-50 font-semibold py-3 rounded-xl shadow-sm transition-all flex items-center justify-center gap-2"
+                      className="w-full bg-white border border-slate-200 text-slate-600 hover:text-slate-800 hover:bg-slate-50 font-semibold py-3 rounded-xl shadow-sm transition-all flex items-center justify-center gap-2 no-print"
                     >
                       <ArrowLeftIcon className="w-4 h-4" />
                       Back to Edit Items
@@ -447,6 +526,73 @@ export default function App() {
               </div>
             </div>
 
+          </div>
+        )}
+
+        {/* Step 4: Report view */}
+        {step === Step.Report && (
+          <div className="max-w-md mx-auto space-y-6 animate-in fade-in zoom-in duration-300 mt-4">
+            {/* Progress Indicator for Report Page */}
+            <div className="flex items-center space-x-2 text-sm font-medium text-slate-500 mb-6 bg-white p-2 rounded-lg shadow-sm border border-slate-100 w-fit mx-auto no-print">
+              <button 
+                onClick={() => setStep(Step.Review)}
+                className="px-2 py-1 rounded-md transition-colors hover:bg-slate-50 text-slate-600"
+              >
+                1. Check Details
+              </button>
+              <ArrowRightIcon className="w-4 h-4 text-slate-300" />
+              <button
+                onClick={() => setStep(Step.Split)}
+                className="px-2 py-1 rounded-md transition-colors hover:bg-slate-50 text-slate-600"
+              >
+                2. Split Bill
+              </button>
+              <ArrowRightIcon className="w-4 h-4 text-slate-300" />
+              <button
+                onClick={() => setStep(Step.Report)}
+                className="px-2 py-1 rounded-md bg-indigo-100 text-indigo-700 font-semibold cursor-default"
+              >
+                3. Report
+              </button>
+            </div>
+
+            <div className="text-center space-y-2 no-print">
+              <h2 className="text-3xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-emerald-600 to-teal-600">
+                お精算完了！
+              </h2>
+              <p className="text-slate-500 text-sm">
+                精算レポートが完成しました。LINE等へのコピーや印刷が可能です。
+              </p>
+            </div>
+
+            <div className="space-y-6">
+              <ResultsSummary items={items} />
+
+              <SplitReport 
+                merchantName={merchantName}
+                date={date}
+                user1Total={calculations.user1Total}
+                user2Total={calculations.user2Total}
+                grandTotal={calculations.grandTotal}
+              />
+
+              <div className="flex gap-3 pt-2 no-print">
+                <button
+                  onClick={() => setStep(Step.Split)}
+                  className="flex-1 bg-white border border-slate-200 text-slate-600 hover:text-slate-800 hover:bg-slate-50 font-semibold py-3 px-4 rounded-xl shadow-sm transition-all flex items-center justify-center gap-2"
+                >
+                  <ArrowLeftIcon className="w-4 h-4" />
+                  戻って修正する
+                </button>
+                <button
+                  onClick={reset}
+                  className="flex-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-semibold py-3 px-4 rounded-xl transition-all flex items-center justify-center gap-2"
+                >
+                  <RefreshIcon className="w-4 h-4" />
+                  新しく精算する
+                </button>
+              </div>
+            </div>
           </div>
         )}
       </main>

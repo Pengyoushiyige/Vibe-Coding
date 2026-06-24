@@ -17,5 +17,7 @@ export interface BillData {
 }
 
 export interface AnalysisResult {
+  merchantName?: string;
+  date?: string;
   items: { name: string; price: number; taxRate: number }[];
 }
